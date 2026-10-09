@@ -38,6 +38,8 @@ interface TreeNode {
   children?: TreeNode[]
   db?: string
   table?: string
+  /** Full unfiltered table children, kept for client-side search filtering */
+  allChildren?: TreeNode[]
 }
 
 const treeData = ref<TreeNode[]>([])
@@ -47,9 +49,24 @@ watch(() => store.currentId, async (connId) => {
   loading.value = true
   try {
     const dbs = await schemaApi.databases(connId)
-    treeData.value = dbs.map((db) => ({
-      title: db, key: `db:${db}`, isLeaf: false, db,
-    }))
+    const nodes: TreeNode[] = await Promise.all(
+      dbs.map(async (db) => {
+        let children: TreeNode[] = []
+        try {
+          const tables = await schemaApi.tables(connId, db)
+          children = tables.map((t) => ({
+            title: t, key: `${db}.${t}`, isLeaf: true, db, table: t,
+          }))
+        } catch {
+          // ignore single-db failure; still show the db node
+        }
+        return {
+          title: db, key: `db:${db}`, isLeaf: false, db,
+          children, allChildren: children,
+        }
+      }),
+    )
+    treeData.value = nodes
   } catch {
     treeData.value = []
   } finally {
@@ -59,15 +76,14 @@ watch(() => store.currentId, async (connId) => {
 
 async function onLoadData(node: TreeNode) {
   const connId = store.currentId!
-  if (node.db && !node.table) {
-    // Load tables
+  if (node.db && !node.table && !node.allChildren) {
+    // Fallback lazy load if allChildren was not populated
     const tables = await schemaApi.tables(connId, node.db)
-    const filtered = searchText.value
-      ? tables.filter((t) => t.toLowerCase().includes(searchText.value.toLowerCase()))
-      : tables
-    node.children = filtered.map((t) => ({
+    const children = tables.map((t) => ({
       title: t, key: `${node.db}.${t}`, isLeaf: true, db: node.db, table: t,
     }))
+    node.children = children
+    node.allChildren = children
   }
 }
 
@@ -79,20 +95,14 @@ function onSelect(keys: string[], info: any) {
   }
 }
 
-// Re-filter when search text changes
-watch(searchText, async () => {
-  const connId = store.currentId
-  if (!connId || treeData.value.length === 0) return
+// Client-side filter over pre-loaded tables; no extra API calls
+watch(searchText, () => {
+  const keyword = searchText.value.toLowerCase()
   for (const dbNode of treeData.value) {
-    if (dbNode.db) {
-      const tables = await schemaApi.tables(connId, dbNode.db)
-      const filtered = searchText.value
-        ? tables.filter((t) => t.toLowerCase().includes(searchText.value.toLowerCase()))
-        : tables
-      dbNode.children = filtered.map((t) => ({
-        title: t, key: `${dbNode.db}.${t}`, isLeaf: true, db: dbNode.db, table: t,
-      }))
-    }
+    if (!dbNode.allChildren) continue
+    dbNode.children = keyword
+      ? dbNode.allChildren.filter((c) => c.title.toLowerCase().includes(keyword))
+      : dbNode.allChildren
   }
 })
 </script>
